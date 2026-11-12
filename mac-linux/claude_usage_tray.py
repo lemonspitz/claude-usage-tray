@@ -122,6 +122,10 @@ def refresh_token(creds, source):
     save_creds(creds, source)
 
 
+class RateLimited(Exception):
+    """Claude answered 429 Too Many Requests."""
+
+
 def get_usage(token):
     return http_json(USAGE_URL, headers={"Authorization": "Bearer " + token, "anthropic-beta": "oauth-2025-04-20"})
 
@@ -150,6 +154,8 @@ def fetch():
             u = get_usage(creds["claudeAiOauth"]["accessToken"])
         elif e.code == 401:
             raise RuntimeError("Token rejected. Sign in to Claude Code again.")
+        elif e.code == 429:
+            raise RateLimited()
         else:
             raise RuntimeError("Could not reach Claude (HTTP %d)" % e.code)
     except urllib.error.URLError as e:
@@ -373,6 +379,7 @@ class App:
         self.pystray = pystray
         self.rows, self.bars, self.plan = [], [None, None, None], None
         self.error, self.updated = "Loading...", None
+        self.notice, self.retry_min = None, 0  # retry_min > 0 while backing off after a 429
         self.settings = dict(DEFAULT_SETTINGS)
         self.settings.update({k: v for k, v in load_settings().items() if k in DEFAULT_SETTINGS})
         for key, choices in (("refreshMinutes", INTERVAL_CHOICES), ("style", STYLE_CHOICES), ("color", COLOR_CHOICES)):
@@ -411,6 +418,7 @@ class App:
         items = [
             Item(lambda item: "Claude usage" + ("  |  " + self.plan if self.plan else ""), _noop, enabled=False),
             Item(lambda item: self.error or "", _noop, enabled=False, visible=lambda item: bool(self.error)),
+            Item(lambda item: self.notice or "", _noop, enabled=False, visible=lambda item: bool(self.notice)),
         ]
         items += [row(i) for i in range(6)]
         items += [
@@ -445,7 +453,7 @@ class App:
         else:
             self.icon.icon = render_icon(self.bars, self.settings)
             names = ("5 hours", "Weekly", "Fable")
-            self.icon.title = "Claude usage\n" + "\n".join(
+            self.icon.title = ("Claude (retrying later)\n" if self.notice else "Claude usage\n") + "\n".join(
                 "%s: %s" % (n, "-" if b is None else "%d%%" % round(b)) for n, b in zip(names, self.bars))
         self.icon.update_menu()
 
@@ -453,6 +461,15 @@ class App:
         try:
             self.rows, self.bars, self.plan = fetch()
             self.error, self.updated = None, dt.datetime.now()
+            self.notice, self.retry_min = None, 0
+        except RateLimited:
+            # Too many requests: back off (doubling, up to 30 min) and keep showing the last numbers
+            self.retry_min = min(30, max(2, max(self.retry_min, self.settings["refreshMinutes"]) * 2))
+            msg = "Claude is limiting requests. Retrying in %d min." % self.retry_min
+            if self.rows:
+                self.notice, self.error = msg + " Showing the last numbers.", None
+            else:
+                self.error = msg
         except Exception as e:
             self.error = str(e)
         self.redraw()
@@ -461,7 +478,7 @@ class App:
         icon.visible = True
         while self.running:
             self.update()
-            self.wake.wait(self.settings["refreshMinutes"] * 60)
+            self.wake.wait((self.retry_min or self.settings["refreshMinutes"]) * 60)
             self.wake.clear()
 
     def quit(self, icon, item):

@@ -49,7 +49,8 @@ function Save-Settings {
 $Launcher  = Join-Path $PSScriptRoot 'Start-ClaudeUsageTray.vbs'
 $StartupLnk = Join-Path ([Environment]::GetFolderPath('Startup')) 'Claude Usage Tray.lnk'
 
-$script:State = @{ Error = 'Loading...'; Rows = @(); Bars = @($null, $null, $null); Updated = $null; Plan = $null }
+$script:State = @{ Error = 'Loading...'; Notice = $null; Rows = @(); Bars = @($null, $null, $null); Updated = $null; Plan = $null }
+$script:RetryMin = 0  # >0 while backing off after "too many requests"
 
 # ---------- data ----------
 
@@ -113,6 +114,7 @@ function Update-Usage {
             $code = 0; if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
             if ($code -eq 401 -and $creds) { Update-Token $creds; $u = Get-UsageRaw $creds.claudeAiOauth.accessToken }
             elseif ($code -eq 401) { throw 'Token rejected. Sign in to Claude Code again.' }
+            elseif ($code -eq 429) { throw 'RATE_LIMITED' }
             else { throw ('Could not reach Claude (' + $_.Exception.Message + ')') }
         }
 
@@ -144,9 +146,23 @@ function Update-Usage {
         }
         if ($rows.Count -eq 0) { throw 'No usage data returned for this account.' }
         $script:State.Rows = $rows; $script:State.Bars = $bars; $script:State.Error = $null; $script:State.Updated = Get-Date
+        $script:State.Notice = $null; $script:RetryMin = 0
     } catch {
-        $script:State.Error = "$($_.Exception.Message)"
+        if ($_.Exception.Message -eq 'RATE_LIMITED') {
+            # Too many requests: back off (doubling, up to 30 min) and keep showing the last numbers
+            $base = [int]$script:Settings.refreshMinutes
+            if ($script:RetryMin -lt $base) { $script:RetryMin = $base }
+            $script:RetryMin = [math]::Min(30, [math]::Max(2, $script:RetryMin * 2))
+            $msg = "Claude is limiting requests. Retrying in $($script:RetryMin) min."
+            if ($script:State.Rows.Count -gt 0) { $script:State.Notice = $msg + ' Showing the last numbers.'; $script:State.Error = $null }
+            else { $script:State.Error = $msg }
+        } else {
+            $script:State.Error = "$($_.Exception.Message)"
+        }
     }
+    $ms = [int]$script:Settings.refreshMinutes * 60000
+    if ($script:RetryMin -gt 0) { $ms = $script:RetryMin * 60000 }
+    if ($script:Timer -and $script:Timer.Interval -ne $ms) { $script:Timer.Interval = $ms }
     Update-Tray
 }
 
@@ -279,7 +295,7 @@ function Update-Tray {
         } else {
             $script:Tray.Icon = New-BarsIcon $b
         }
-        $tip = 'Claude usage'
+        $tip = 'Claude usage'; if ($script:State.Notice) { $tip = 'Claude (retrying later)' }
         $labels = @('5 hours', 'Weekly', 'Fable')
         for ($i = 0; $i -lt 3; $i++) {
             $v = '-'; if ($null -ne $b[$i]) { $v = [string][int][math]::Round($b[$i]) + '%' }
@@ -314,6 +330,10 @@ $script:Popup.Add_Paint({
     $g.DrawString($hdr, $title, $white, $x, $y); $y += Px 32
     if ($script:State.Error) {
         $g.DrawString($script:State.Error, $body, $white, (New-Object Drawing.RectangleF $x, $y, ($w - 2 * $x), (Px 60))); $y += Px 64
+    }
+    if ($script:State.Notice) {
+        $amber = New-Object Drawing.SolidBrush ([Drawing.Color]::FromArgb(230, 170, 60))
+        $g.DrawString($script:State.Notice, $small, $amber, (New-Object Drawing.RectangleF $x, $y, ($w - 2 * $x), (Px 36))); $y += Px 40
     }
     foreach ($row in $script:State.Rows) {
         $g.DrawString($row.Name, $body, $white, $x, $y)

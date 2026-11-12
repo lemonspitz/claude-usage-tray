@@ -99,6 +99,7 @@ Settings are saved in `settings.json` next to the script on Windows, and in `~/.
 ## Troubleshooting
 
 - **The icon shows `?` (Windows) or hollow bars (macOS/Linux):** hover over it, or click it, to read the error. Usually you need to run `claude` and sign in again.
+- **"Claude is limiting requests":** Claude's servers are getting too many requests and have paused answering for a while. The widget keeps showing your last numbers and retries automatically, waiting longer each time (up to 30 minutes). To avoid it, use a refresh interval of 5 minutes or more.
 - **No Fable bar:** the bottom bar shows only a grey track when your plan has no separate Fable limit.
 
 ## Disclaimer
